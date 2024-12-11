@@ -1,4 +1,5 @@
 from __future__ import annotations
+from openrouter import OpenRouterClient
 
 import logging
 from datetime import datetime
@@ -181,7 +182,7 @@ class MessageManager:
 		else:
 			tokens += self._count_text_tokens(message.content)
 		return tokens
-
+	
 	def _count_text_tokens(self, text: str) -> int:
 		"""Count tokens in a text string"""
 		if isinstance(self.llm, (ChatOpenAI, ChatAnthropic)):
@@ -190,9 +191,9 @@ class MessageManager:
 			except Exception:
 				tokens = (
 					len(text) // self.ESTIMATED_TOKENS_PER_CHARACTER
-				)  # Rough estimate if no tokenizer available
+				)  # Estimate
 		else:
 			tokens = (
 				len(text) // self.ESTIMATED_TOKENS_PER_CHARACTER
-			)  # Rough estimate if no tokenizer available
+			)  # Estimate
 		return tokens

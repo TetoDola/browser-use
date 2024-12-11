@@ -1,5 +1,6 @@
 from __future__ import annotations
-
+from openrouter import OpenRouterClient
+from pydantic import BaseModel
 import asyncio
 import json
 import logging
@@ -50,12 +51,21 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar('T', bound=BaseModel)
 
+class OpenRouterConfig(BaseModel):
+    """Configuration for OpenRouter"""
+    api_key: str
+    model: str = "anthropic/claude-2"
+    temperature: float = 0.7
+    max_tokens: Optional[int] = None
+    top_p: Optional[float] = None
+    stream: bool = False
 
 class Agent:
 	def __init__(
 		self,
 		task: str,
-		llm: BaseChatModel,
+		llm: Optional[BaseChatModel] = None,
+		openrouter_config: Optional[OpenRouterConfig] = None,
 		browser: Browser | None = None,
 		browser_context: BrowserContext | None = None,
 		controller: Controller = Controller(),
@@ -81,6 +91,16 @@ class Agent:
 		max_error_length: int = 400,
 		max_actions_per_step: int = 10,
 	):
+		if openrouter_config:
+			self.openrouter_client = OpenRouterClient(api_key=openrouter_config.api_key)
+			self.openrouter_config = openrouter_config
+			self.use_openrouter = True
+		elif llm:
+			self.llm = llm
+			self.use_openrouter = False
+		else:
+			raise ValueError("Either llm or openrouter_config must be provided")
+			
 		self.agent_id = str(uuid.uuid4())  # unique identifier for the agent
 
 		self.task = task
@@ -254,18 +274,60 @@ class Agent:
 
 	@time_execution_async('--get_next_action')
 	async def get_next_action(self, input_messages: list[BaseMessage]) -> AgentOutput:
-		"""Get next action from LLM based on current state"""
+		"""Get next action from LLM or OpenRouter based on current state"""
+		if self.use_openrouter:
+			try:
+				formatted_messages = []
+				for message in input_messages:
+					if isinstance(message.content, list):
+						# Handle multimodal messages (text + images)
+						text_content = []
+						for item in message.content:
+							if isinstance(item, dict) and item.get("type") == "text":
+								text_content.append(item["text"])
+						formatted_content = "\n".join(text_content)
+					else:
+						formatted_content = message.content
+					
+					if isinstance(message, SystemMessage):
+						role = "system"
+					elif isinstance(message, AIMessage):
+						role = "assistant"
+					else:
+						role = "user"
+						
+					formatted_messages.append({
+						"role": role,
+						"content": formatted_content
+					})
 
-		structured_llm = self.llm.with_structured_output(self.AgentOutput, include_raw=True)
-		response: dict[str, Any] = await structured_llm.ainvoke(input_messages)  # type: ignore
-
-		parsed: AgentOutput = response['parsed']
-		# cut the number of actions to max_actions_per_step
-		parsed.action = parsed.action[: self.max_actions_per_step]
-		self._log_response(parsed)
-		self.n_steps += 1
-
-		return parsed
+				response = await self.openrouter_client.chat.completions.create(
+					model=self.openrouter_config.model,
+					messages=formatted_messages,
+					temperature=self.openrouter_config.temperature,
+					max_tokens=self.openrouter_config.max_tokens,
+					top_p=self.openrouter_config.top_p,
+					stream=self.openrouter_config.stream
+				)
+				
+				content = response.choices[0].message.content
+				parsed = self.AgentOutput.parse_raw(content)
+				parsed.action = parsed.action[:self.max_actions_per_step]
+				self._log_response(parsed)
+				self.n_steps += 1
+				return parsed
+			except Exception as e:
+				logger.error(f"OpenRouter error: {str(e)}")
+				raise
+		else:
+			# Existing LangChain logic
+			structured_llm = self.llm.with_structured_output(self.AgentOutput, include_raw=True)
+			response: dict[str, Any] = await structured_llm.ainvoke(input_messages)
+			parsed: AgentOutput = response["parsed"]
+			parsed.action = parsed.action[:self.max_actions_per_step]
+			self._log_response(parsed)
+			self.n_steps += 1
+			return parsed
 
 	def _log_response(self, response: AgentOutput) -> None:
 		"""Log the model's response"""
